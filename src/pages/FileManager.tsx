@@ -66,8 +66,16 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
   const setPanelOpen = useTransferStore((s) => s.setPanelOpen);
 
   // Bucket stats from global store
-  const { buckets } = useAppStore();
+  const { buckets, publicDownloadDomain } = useAppStore();
   const bucketInfo = buckets.find(b => b.tbl === bucket);
+  const isPrivateBucket = bucketInfo ? bucketInfo.private === 1 : true;
+  const downloadDomain = !isPrivateBucket && publicDownloadDomain.trim()
+    ? publicDownloadDomain.trim()
+    : (domains[0] || '');
+  const buildDownloadUrl = useCallback((key: string) => {
+    if (!downloadDomain) throw new Error('此存储空间未配置访问域名');
+    return generateDownloadUrl(ak, sk, downloadDomain, key, isPrivateBucket);
+  }, [ak, sk, downloadDomain, isPrivateBucket]);
   
   // Folder upload dialog
   const [folderUploadPath, setFolderUploadPath] = useState<string | null>(null);
@@ -182,8 +190,8 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
     setEditorError('');
     setEditorLoading(true);
     try {
-      if (domains.length === 0) throw new Error('此存储空间未绑定外链域名，无法读取文件');
-      const content = await fetchTextFile(ak, sk, domains[0], file.key);
+      if (!downloadDomain) throw new Error('此存储空间未绑定外链域名，无法读取文件');
+      const content = await fetchTextFile(ak, sk, downloadDomain, file.key, isPrivateBucket);
       setEditorContent(content);
       setEditorOriginalContent(content);
     } catch (err: any) {
@@ -191,7 +199,7 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
     } finally {
       setEditorLoading(false);
     }
-  }, [ak, sk, domains]);
+  }, [ak, sk, downloadDomain, isPrivateBucket]);
 
   const closeTextEditor = useCallback(() => {
     if (editorDirty && !window.confirm('文件尚未保存，确定关闭编辑器吗？')) return;
@@ -487,14 +495,14 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
 
   // ── Download ──
   const handleDownload = async (key: string) => {
-    if (domains.length === 0) { toast.warning("此存储空间未绑定外链域名，无法下载"); return; }
+    if (!downloadDomain) { toast.warning("此存储空间未绑定外链域名，无法下载"); return; }
     const filename = key.split('/').pop() || key;
     const savePath = await save({
       title: "保存文件",
       defaultPath: filename,
     });
     if (!savePath) return;
-    const url = generateDownloadUrl(ak, sk, domains[0], key);
+    const url = buildDownloadUrl(key);
     const tid = toast.loading(`正在下载 ${filename}...`, { duration: Infinity });
     try {
       await invoke("download_file", { url, savePath });
@@ -833,14 +841,14 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
   const handleBatchDownload = async () => {
     const keys = [...selectedKeys];
     if (keys.length === 0) return;
-    if (domains.length === 0) { toast.warning('此存储空间未绑定外链域名，无法下载'); return; }
+    if (!downloadDomain) { toast.warning('此存储空间未绑定外链域名，无法下载'); return; }
     const dir = await open({ directory: true, title: '选择保存目录' });
     if (!dir || Array.isArray(dir)) return;
     
     setPanelOpen(true); // Open transfer panel
     
     const batchItems: [string, string][] = keys.map(key => [
-      generateDownloadUrl(ak, sk, domains[0], key),
+      buildDownloadUrl(key),
       key.split('/').pop() || key,
     ]);
     
@@ -858,7 +866,7 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
   };
   
   const handleDownloadFolder = async (folderPrefix: string) => {
-    if (domains.length === 0) { toast.warning('此存储空间未绑定外链域名，无法下载'); return; }
+    if (!downloadDomain) { toast.warning('此存储空间未绑定外链域名，无法下载'); return; }
     
     const dir = await open({ directory: true, title: '选择保存目录' });
     if (!dir || Array.isArray(dir)) return;
@@ -911,7 +919,7 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
       const batchItems: [string, string][] = allFiles
         .filter(file => !file.key.endsWith('/'))
         .map(file => [
-          generateDownloadUrl(ak, sk, domains[0], file.key),
+          buildDownloadUrl(file.key),
           folderName + '/' + file.key.slice(folderPrefix.length), // Add folder name prefix
         ]);
       
@@ -956,10 +964,8 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
   // ─── Copy link ───────────────────────────────────────────────────────────
   const handleCopyLink = (e: React.MouseEvent, key: string) => {
     e.stopPropagation();
-    if (domains.length === 0) { toast.warning("此存储空间未绑定外链域名"); return; }
-    let domain = domains[0];
-    if (!domain.startsWith("http")) domain = "http://" + domain;
-    const url = `${domain}/${encodeURI(key)}`;
+    if (!downloadDomain) { toast.warning("此存储空间未绑定外链域名"); return; }
+    const url = buildDownloadUrl(key);
     navigator.clipboard.writeText(url).then(() => {
       setCopiedKey(key);
       toast.success("已复制到剪贴板");
@@ -1605,7 +1611,7 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
                   onClick={() => openPreview(selectedFile)}
                 >
                   <img
-                    src={generateDownloadUrl(ak, sk, domains[0], selectedFile.key)}
+                    src={buildDownloadUrl(selectedFile.key)}
                     alt={selectedFile.key}
                     className="max-w-full max-h-56 object-contain"
                     onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
@@ -1708,7 +1714,7 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
 
           {/* Image */}
           <img
-            src={generateDownloadUrl(ak, sk, domains[0], previewFile.key)}
+            src={buildDownloadUrl(previewFile.key)}
             alt={previewFile.key}
             className="max-w-[90vw] max-h-[90vh] object-contain select-none"
             onClick={(e) => e.stopPropagation()}

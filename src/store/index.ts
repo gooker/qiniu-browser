@@ -35,6 +35,10 @@ interface AppState {
   // 缓存设置
   cacheExpireMinutes: number;
   setCacheExpireMinutes: (minutes: number) => void;
+
+  // 公有空间访问域名
+  publicDownloadDomain: string;
+  setPublicDownloadDomain: (domain: string) => void;
   
   // 域名缓存
   bucketDomains: Map<string, { domains: string[]; timestamp: number }>;
@@ -131,6 +135,9 @@ export const useAppStore = create<AppState>()(
       // 缓存设置
       cacheExpireMinutes: 5,
       setCacheExpireMinutes: (minutes) => set({ cacheExpireMinutes: minutes }),
+
+      publicDownloadDomain: '',
+      setPublicDownloadDomain: (domain) => set({ publicDownloadDomain: domain }),
       
       // 域名缓存（1小时过期）
       bucketDomains: new Map(),
@@ -200,6 +207,7 @@ export const useAppStore = create<AppState>()(
         theme: state.theme,
         itemsPerPage: state.itemsPerPage,
         cacheExpireMinutes: state.cacheExpireMinutes,
+        publicDownloadDomain: state.publicDownloadDomain,
         notifyOnComplete: state.notifyOnComplete,
         bookmarks: state.bookmarks,
       }),

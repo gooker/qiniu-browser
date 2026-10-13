@@ -334,6 +334,12 @@ export async function deleteBucket(ak: string, sk: string, bucket: string): Prom
  * 生成文件下载 URL
  * 私有 bucket 需要签名，公开 bucket 直接返回原始 URL
  */
+function normalizeDownloadDomain(domain: string): string {
+  const normalized = domain.trim().replace(/\/+$/, '');
+  if (!normalized) throw new Error('下载域名未配置');
+  return /^https?:\/\//i.test(normalized) ? normalized : `http://${normalized}`;
+}
+
 export function generateDownloadUrl(
   ak: string,
   sk: string,
@@ -342,7 +348,7 @@ export function generateDownloadUrl(
   isPrivate: boolean = true,
   expireSeconds: number = 3600
 ): string {
-  if (!domain.startsWith("http")) domain = "http://" + domain;
+  domain = normalizeDownloadDomain(domain);
   const baseUrl = `${domain}/${encodeURI(key)}`;
   if (!isPrivate) return baseUrl;
 
@@ -389,9 +395,10 @@ export async function fetchTextFile(
   sk: string,
   domain: string,
   key: string,
+  isPrivate: boolean = true,
   maxBytes: number = MAX_EDITABLE_TEXT_BYTES,
 ): Promise<string> {
-  const response = await tauriFetch(generateDownloadUrl(ak, sk, domain, key));
+  const response = await tauriFetch(generateDownloadUrl(ak, sk, domain, key, isPrivate));
   if (!response.ok) throw await parseQiniuError(response, '读取文本文件失败');
   const length = Number(response.headers.get('content-length') || 0);
   if (length > maxBytes) throw new Error(`文件超过 ${Math.floor(maxBytes / 1024 / 1024)} MiB，暂不支持在线编辑`);

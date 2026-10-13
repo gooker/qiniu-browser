@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { open } from "@tauri-apps/plugin-shell";
 import { useAppStore, Theme } from "../store";
-import { Sun, Moon, Monitor, Cat, Download } from "lucide-react";
+import { Sun, Moon, Monitor, Cat, Download, Globe } from "lucide-react";
 
 const THEME_OPTIONS: { value: Theme; label: string; icon: typeof Sun }[] = [
   { value: "light",  label: "浅色",   icon: Sun },
@@ -15,6 +15,7 @@ export function SettingsPanel({ onCheckUpdate, appVersion }: { onCheckUpdate: ()
     theme, setTheme,
     itemsPerPage, setItemsPerPage,
     cacheExpireMinutes, setCacheExpireMinutes,
+    publicDownloadDomain, setPublicDownloadDomain,
   } = useAppStore();
   
   const [cacheSize, setCacheSize] = useState<string>('计算中...');
@@ -131,6 +132,30 @@ export function SettingsPanel({ onCheckUpdate, appVersion }: { onCheckUpdate: ()
                 ))}
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* 公有空间 */}
+        <div className="pt-6 border-t border-zinc-100 dark:border-zinc-800">
+          <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-200 mb-3 flex items-center gap-2">
+            <Globe className="w-4 h-4 text-emerald-500" />
+            公有空间
+          </h3>
+          <div className="space-y-2">
+            <label className="text-xs text-zinc-500 dark:text-zinc-400 block" htmlFor="public-download-domain">
+              访问域名
+            </label>
+            <input
+              id="public-download-domain"
+              value={publicDownloadDomain}
+              onChange={(e) => setPublicDownloadDomain(e.target.value.trim())}
+              placeholder="例如：http://update.hsagv.com"
+              spellCheck={false}
+              className="h-9 w-full rounded-lg border border-zinc-200 dark:border-zinc-700 bg-transparent px-3 text-sm outline-none transition-colors focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+            />
+            <p className="text-xs leading-5 text-zinc-400 dark:text-zinc-500">
+              仅用于公有空间的预览、复制链接和下载。请填写已绑定的自定义域名，不要填写七牛测试域名。
+            </p>
           </div>
         </div>
 
