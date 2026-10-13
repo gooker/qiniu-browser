@@ -31,3 +31,4 @@ src-tauri/target
 
 # OS files
 Thumbs.db
+release/
