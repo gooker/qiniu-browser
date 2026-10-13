@@ -353,6 +353,109 @@ export function generateDownloadUrl(
   return `${urlWithDeadline}&token=${ak}:${sign}`;
 }
 
+
+export const TEXT_FILE_EXTENSIONS = new Set([
+  'txt', 'text', 'md', 'markdown', 'json', 'xml', 'xlm', 'yaml', 'yml',
+  'csv', 'tsv', 'log', 'ini', 'conf', 'config', 'properties', 'toml', 'env',
+  'sql', 'js', 'ts', 'jsx', 'tsx', 'css', 'html', 'svg',
+]);
+
+export function isEditableTextFile(file: Pick<QiniuFile, 'key' | 'mimeType'>): boolean {
+  const name = file.key.split('/').pop() || file.key;
+  const extension = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+  return TEXT_FILE_EXTENSIONS.has(extension) || file.mimeType?.toLowerCase().startsWith('text/') === true;
+}
+
+export interface QiniuFileStat {
+  hash: string;
+  fsize: number;
+  mimeType?: string;
+  putTime?: number;
+  type?: number;
+}
+
+const MAX_EDITABLE_TEXT_BYTES = 5 * 1024 * 1024;
+
+function decodeUtf8Text(bytes: ArrayBuffer): string {
+  const data = new Uint8Array(bytes);
+  if (data.length >= 3 && data[0] === 0xef && data[1] === 0xbb && data[2] === 0xbf) {
+    return new TextDecoder('utf-8', { fatal: true }).decode(data.subarray(3));
+  }
+  return new TextDecoder('utf-8', { fatal: true }).decode(data);
+}
+
+export async function fetchTextFile(
+  ak: string,
+  sk: string,
+  domain: string,
+  key: string,
+  maxBytes: number = MAX_EDITABLE_TEXT_BYTES,
+): Promise<string> {
+  const response = await tauriFetch(generateDownloadUrl(ak, sk, domain, key));
+  if (!response.ok) throw await parseQiniuError(response, '读取文本文件失败');
+  const length = Number(response.headers.get('content-length') || 0);
+  if (length > maxBytes) throw new Error(`文件超过 ${Math.floor(maxBytes / 1024 / 1024)} MiB，暂不支持在线编辑`);
+  try {
+    const content = decodeUtf8Text(await response.arrayBuffer());
+    if (new TextEncoder().encode(content).byteLength > maxBytes) {
+      throw new Error(`文件超过 ${Math.floor(maxBytes / 1024 / 1024)} MiB，暂不支持在线编辑`);
+    }
+    return content;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('超过')) throw err;
+    throw new Error('文件不是 UTF-8 文本，暂不支持在线编辑');
+  }
+}
+
+export async function statFile(
+  ak: string,
+  sk: string,
+  bucket: string,
+  key: string,
+): Promise<QiniuFileStat> {
+  const host = 'rs.qiniuapi.com';
+  const path = `/stat/${urlSafeBase64Encode(`${bucket}:${key}`)}`;
+  const response = await loggedFetch(`https://${host}${path}`, {
+    method: 'GET',
+    headers: {
+      Authorization: generateQiniuToken(ak, sk, 'GET', path, host, 'application/x-www-form-urlencoded'),
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+  });
+  if (!response.ok) throw await parseQiniuError(response, '获取文件状态失败');
+  return await response.json() as QiniuFileStat;
+}
+
+export async function uploadTextFile(
+  ak: string,
+  sk: string,
+  bucket: string,
+  region: string,
+  key: string,
+  content: string,
+  mimeType: string,
+): Promise<{ key: string; hash: string }> {
+  const scope = `${bucket}:${key}`;
+  const deadline = Math.floor(Date.now() / 1000) + 3600;
+  const putPolicy = JSON.stringify({ scope, deadline, insertOnly: 0 });
+  const encodedPolicy = urlSafeBase64Encode(putPolicy);
+  const sign = CryptoJS.HmacSHA1(encodedPolicy, sk);
+  const uploadToken = `${ak}:${urlSafeBase64Encode(sign)}:${encodedPolicy}`;
+  const formData = new FormData();
+  formData.append('token', uploadToken);
+  formData.append('key', key);
+  formData.append('mimeType', mimeType || 'text/plain;charset=utf-8');
+  formData.append('file', new Blob([content], { type: mimeType || 'text/plain;charset=utf-8' }), key.split('/').pop() || key);
+
+  const response = await loggedFetch(`https://${getUploadDomain(region)}`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!response.ok) throw await parseQiniuError(response, '保存文本文件失败');
+  const data = await response.json() as { key?: string; hash?: string };
+  return { key: data.key || key, hash: data.hash || '' };
+}
+
 export async function batchOperations(ak: string, sk: string, ops: string[]): Promise<any> {
   if (ops.length === 0) return [];
   const host = "rs.qiniuapi.com";

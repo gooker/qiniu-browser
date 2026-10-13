@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { fetchFiles, fetchBucketDomains, QiniuFile, deleteFile, deleteDirectory, generateDownloadUrl, batchDeleteFiles, renameFile, createFolder } from "../lib/qiniu";
+import { fetchFiles, fetchBucketDomains, QiniuFile, deleteFile, deleteDirectory, generateDownloadUrl, batchDeleteFiles, renameFile, createFolder, isEditableTextFile, fetchTextFile, statFile, uploadTextFile } from "../lib/qiniu";
 import { Skeleton } from "../components/ui/skeleton";
 import {
   File, Image, Film, FileText, Archive,
@@ -13,6 +13,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { FolderUploadDialog } from "../components/FolderUploadDialog";
+import { TextEditorModal } from "../components/TextEditorModal";
 import { useTransferStore, type TransferTask } from "../store/transfer";
 import { useAppStore } from "../store";
 import { formatBytes, formatQiniuTime } from "../lib/utils";
@@ -149,6 +150,16 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
   // ── Image preview state ──
   const [previewFile, setPreviewFile] = useState<QiniuFile | null>(null);
 
+  // ── Text editor state ──
+  const [editingFile, setEditingFile] = useState<QiniuFile | null>(null);
+  const [editorContent, setEditorContent] = useState('');
+  const [editorOriginalContent, setEditorOriginalContent] = useState('');
+  const [editorOriginalHash, setEditorOriginalHash] = useState('');
+  const [editorLoading, setEditorLoading] = useState(false);
+  const [editorSaving, setEditorSaving] = useState(false);
+  const [editorError, setEditorError] = useState('');
+  const editorDirty = editorContent !== editorOriginalContent;
+
   // 所有图片文件列表（用于前后导航）
   const imageFiles = useMemo(() =>
     items.filter(f => f.mimeType?.startsWith('image/')),
@@ -159,6 +170,37 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
     if (!file.mimeType?.startsWith('image/')) return;
     setPreviewFile(file);
   };
+
+  const openTextEditor = useCallback(async (file: QiniuFile) => {
+    if (!isEditableTextFile(file)) return;
+    setSelectedFile(null);
+    setCtxMenu(null);
+    setEditingFile(file);
+    setEditorContent('');
+    setEditorOriginalContent('');
+    setEditorOriginalHash(file.hash || '');
+    setEditorError('');
+    setEditorLoading(true);
+    try {
+      if (domains.length === 0) throw new Error('此存储空间未绑定外链域名，无法读取文件');
+      const content = await fetchTextFile(ak, sk, domains[0], file.key);
+      setEditorContent(content);
+      setEditorOriginalContent(content);
+    } catch (err: any) {
+      setEditorError(err?.message || '读取文本文件失败');
+    } finally {
+      setEditorLoading(false);
+    }
+  }, [ak, sk, domains]);
+
+  const closeTextEditor = useCallback(() => {
+    if (editorDirty && !window.confirm('文件尚未保存，确定关闭编辑器吗？')) return;
+    setEditingFile(null);
+    setEditorContent('');
+    setEditorOriginalContent('');
+    setEditorOriginalHash('');
+    setEditorError('');
+  }, [editorDirty]);
 
   const closePreview = () => setPreviewFile(null);
 
@@ -180,7 +222,7 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
   const openCtxMenu = (e: React.MouseEvent, file: QiniuFile) => {
     e.preventDefault();
     e.stopPropagation();
-    const menuW = 176, menuH = 200;
+    const menuW = 176, menuH = isEditableTextFile(file) ? 248 : 200;
     const x = e.clientX + menuW > window.innerWidth  ? e.clientX - menuW : e.clientX;
     const y = e.clientY + menuH > window.innerHeight ? e.clientY - menuH : e.clientY;
     setCtxMenu({ file, x, y });
@@ -536,6 +578,37 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
       setLoading(false);
     }
   }, [ak, sk, bucket, CACHE_TTL, itemsPerPage]);
+  const saveTextEditor = useCallback(async () => {
+    if (!editingFile || editorLoading || editorSaving || editorError || !editorDirty) return;
+    const region = bucketInfo?.region || 'z0';
+    setEditorSaving(true);
+    try {
+      if (editorOriginalHash) {
+        const latest = await statFile(ak, sk, bucket, editingFile.key);
+        if (latest.hash && latest.hash !== editorOriginalHash) {
+          const overwrite = window.confirm('远端文件已经发生变化，继续保存会覆盖远端内容。确定继续吗？');
+          if (!overwrite) return;
+        }
+      }
+      const result = await uploadTextFile(
+        ak,
+        sk,
+        bucket,
+        region,
+        editingFile.key,
+        editorContent,
+        editingFile.mimeType || 'text/plain;charset=utf-8',
+      );
+      setEditorOriginalContent(editorContent);
+      setEditorOriginalHash(result.hash || editorOriginalHash);
+      await loadDirectory(currentPrefix, true);
+      toast.success('文件保存成功', { description: editingFile.key });
+    } catch (err: any) {
+      toast.error('保存文件失败', { description: err?.message || String(err) });
+    } finally {
+      setEditorSaving(false);
+    }
+  }, [ak, sk, bucket, bucketInfo?.region, currentPrefix, editingFile, editorContent, editorDirty, editorError, editorLoading, editorOriginalHash, editorSaving, loadDirectory]);
 
   const clearSearch = useCallback(() => {
     setSearchInput("");
@@ -1371,7 +1444,7 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
                     key={`f:${file.key}`}
                     style={rowStyle}
                     onClick={() => !someSelected && !isRenaming && setSelectedFile(file)}
-                    onDoubleClick={() => !isRenaming && openPreview(file)}
+                    onDoubleClick={() => { if (isRenaming) return; isEditableTextFile(file) ? openTextEditor(file) : openPreview(file); }}
                     onContextMenu={(e) => openCtxMenu(e, file)}
                     className={`group flex items-center cursor-pointer border-b border-zinc-100 dark:border-zinc-800/60 transition-colors text-sm
                       ${isChecked ? 'bg-emerald-50/60 dark:bg-emerald-900/10 hover:bg-emerald-50 dark:hover:bg-emerald-900/20' : 'hover:bg-zinc-50/80 dark:hover:bg-zinc-800/30'}
@@ -1453,6 +1526,14 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
             className="fixed z-50 min-w-44 bg-white dark:bg-zinc-900 rounded-xl shadow-2xl border border-zinc-200 dark:border-zinc-700 py-1 overflow-hidden"
             style={{ left: ctxMenu.x, top: ctxMenu.y }}
           >
+            {isEditableTextFile(ctxMenu.file) && (
+              <button
+                onClick={() => { openTextEditor(ctxMenu.file); closeCtxMenu(); }}
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/30 transition-colors"
+              >
+                <Pencil className="w-4 h-4" />编辑
+              </button>
+            )}
             <button
               onClick={() => { setSelectedFile(ctxMenu.file); closeCtxMenu(); }}
               className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
@@ -1551,6 +1632,14 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
 
             {/* Footer */}
             <div className="px-4 py-4 border-t border-zinc-100 dark:border-zinc-800 flex flex-col gap-2 shrink-0">
+              {isEditableTextFile(selectedFile) && (
+                <button
+                  onClick={() => openTextEditor(selectedFile)}
+                  className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40 transition-colors"
+                >
+                  <Pencil className="w-4 h-4" />编辑文件
+                </button>
+              )}
               <button
                 onClick={(e) => { handleCopyLink(e, selectedFile.key); }}
                 className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 transition-colors"
@@ -1631,6 +1720,20 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
             {previewFile.key.split('/').pop()}
           </div>
         </div>
+      )}
+
+      {editingFile && (
+        <TextEditorModal
+          file={editingFile}
+          content={editorContent}
+          loading={editorLoading}
+          saving={editorSaving}
+          error={editorError}
+          dirty={editorDirty}
+          onChange={setEditorContent}
+          onSave={saveTextEditor}
+          onClose={closeTextEditor}
+        />
       )}
 
       {/* ── Create Folder Modal ── */}
