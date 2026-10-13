@@ -143,6 +143,7 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
     hasMore: boolean;
     timestamp: number;
   }>>(new Map());
+  const directoryRequestId = useRef(0);
   
   // Get cache expire time from settings
   const { cacheExpireMinutes, itemsPerPage } = useAppStore();
@@ -534,6 +535,8 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
 
   // ─── Load files whenever prefix changes ──────────────────────────────────
   const loadDirectory = useCallback(async (prefix: string, forceRefresh = false) => {
+    const requestId = ++directoryRequestId.current;
+
     // Check cache first with expiration
     if (!forceRefresh && dirCache.current.has(prefix)) {
       const cached = dirCache.current.get(prefix)!;
@@ -564,6 +567,8 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
     setSelectedKeys(new Set());
     try {
       const res = await fetchFiles(ak, sk, bucket, prefix, "", itemsPerPage, "/");
+      if (requestId !== directoryRequestId.current) return;
+
       const { items: newItems, folders: newFolders, nextMarker: newMarker, hasMore: newHasMore } =
         normalizeListResult(res);
 
@@ -579,9 +584,10 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
         timestamp: Date.now()
       });
     } catch (err: any) {
+      if (requestId !== directoryRequestId.current) return;
       setError(err.message || "加载失败");
     } finally {
-      setLoading(false);
+      if (requestId === directoryRequestId.current) setLoading(false);
     }
   }, [ak, sk, bucket, CACHE_TTL, itemsPerPage]);
   const saveTextEditor = useCallback(async () => {
