@@ -503,6 +503,7 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
     });
     if (!savePath) return;
     const url = buildDownloadUrl(key);
+    setPanelOpen(true);
     const tid = toast.loading(`正在下载 ${filename}...`, { duration: Infinity });
     try {
       await invoke("download_file", { url, savePath });

@@ -352,6 +352,74 @@ async fn upload_files(
     }).await.unwrap_or_else(|e| Err(format!("Task panicked: {}", e)))
 }
 
+fn emit_download_progress(
+    app: &AppHandle,
+    task_id: &str,
+    file_name: &str,
+    url: &str,
+    total_size: u64,
+    downloaded_size: u64,
+    progress: f64,
+    status: &str,
+    error: Option<String>,
+) {
+    let _ = app.emit("download-progress", DownloadProgressEvent {
+        task_id: task_id.to_string(),
+        file_name: file_name.to_string(),
+        url: url.to_string(),
+        total_size,
+        downloaded_size,
+        progress,
+        status: status.to_string(),
+        error,
+    });
+}
+
+async fn read_download_response(
+    app: &AppHandle,
+    task_id: &str,
+    file_name: &str,
+    url: &str,
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, String> {
+    let total_size = response.content_length().unwrap_or(0);
+    let mut bytes = Vec::with_capacity(total_size.min(usize::MAX as u64) as usize);
+    let mut downloaded_size = 0u64;
+    let mut last_emit = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let mut last_progress = -1.0f64;
+
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        downloaded_size += chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+
+        let progress = if total_size > 0 {
+            downloaded_size as f64 / total_size as f64 * 100.0
+        } else {
+            0.0
+        };
+        let now = std::time::Instant::now();
+        let due = now.duration_since(last_emit) >= std::time::Duration::from_millis(200)
+            || (progress - last_progress).abs() >= 1.0;
+        if due {
+            last_emit = now;
+            last_progress = progress;
+            emit_download_progress(
+                app,
+                task_id,
+                file_name,
+                url,
+                total_size,
+                downloaded_size,
+                progress,
+                "downloading",
+                None,
+            );
+        }
+    }
+
+    Ok(bytes)
+}
+
 #[derive(serde::Serialize)]
 struct DownloadResult {
     downloaded: Vec<String>,
@@ -376,126 +444,77 @@ async fn download_files_to_dir(
         let fl = Arc::clone(&failed);
         let app_clone = app.clone();
         let task_id = uuid::Uuid::new_v4().to_string();
-        
+
         tokio::spawn(async move {
-            // Emit start event
-            let _ = app_clone.emit("download-progress", DownloadProgressEvent {
-                task_id: task_id.clone(),
-                file_name: filename.clone(),
-                url: url.clone(),
-                total_size: 0,
-                downloaded_size: 0,
-                progress: 0.0,
-                status: "downloading".to_string(),
-                error: None,
-            });
-            
-            match reqwest::get(&url).await {
-                Ok(resp) if resp.status().is_success() => {
-                    let total_size = resp.content_length().unwrap_or(0);
-                    match resp.bytes().await {
-                        Ok(bytes) => {
-                            let downloaded_size = bytes.len() as u64;
-                            
-                            // Create parent directories if they don't exist
-                            if let Some(parent) = save_path.parent() {
-                                if let Err(e) = fs::create_dir_all(parent) {
-                                    let error_msg = format!("{}: {}", filename, e);
-                                    fl.lock().unwrap().push(error_msg.clone());
-                                    let _ = app_clone.emit("download-progress", DownloadProgressEvent {
-                                        task_id,
-                                        file_name: filename,
-                                        url,
-                                        total_size,
-                                        downloaded_size: 0,
-                                        progress: 0.0,
-                                        status: "failed".to_string(),
-                                        error: Some(error_msg),
-                                    });
-                                    return;
-                                }
-                            }
-                            
-                            match fs::write(&save_path, &bytes) {
-                                Ok(_) => {
-                                    dl.lock().unwrap().push(filename.clone());
-                                    // Emit success event
-                                    let _ = app_clone.emit("download-progress", DownloadProgressEvent {
-                                        task_id,
-                                        file_name: filename,
-                                        url,
-                                        total_size,
-                                        downloaded_size,
-                                        progress: 100.0,
-                                        status: "completed".to_string(),
-                                        error: None,
-                                    });
-                                },
-                                Err(e) => {
-                                    let error_msg = format!("{}: {}", filename, e);
-                                    fl.lock().unwrap().push(error_msg.clone());
-                                    let _ = app_clone.emit("download-progress", DownloadProgressEvent {
-                                        task_id,
-                                        file_name: filename,
-                                        url,
-                                        total_size,
-                                        downloaded_size: 0,
-                                        progress: 0.0,
-                                        status: "failed".to_string(),
-                                        error: Some(error_msg),
-                                    });
-                                },
-                            }
-                        },
-                        Err(e) => {
-                            let error_msg = format!("{}: {}", filename, e);
-                            fl.lock().unwrap().push(error_msg.clone());
-                            let _ = app_clone.emit("download-progress", DownloadProgressEvent {
-                                task_id,
-                                file_name: filename,
-                                url,
-                                total_size,
-                                downloaded_size: 0,
-                                progress: 0.0,
-                                status: "failed".to_string(),
-                                error: Some(error_msg),
-                            });
-                        },
-                    }
+            emit_download_progress(
+                &app_clone,
+                &task_id,
+                &filename,
+                &url,
+                0,
+                0,
+                0.0,
+                "downloading",
+                None,
+            );
+
+            let result: Result<u64, String> = async {
+                let response = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+                if !response.status().is_success() {
+                    return Err(format!("HTTP {}", response.status()));
                 }
-                Ok(resp) => {
-                    let error_msg = format!("{}: HTTP {}", filename, resp.status());
+                let bytes = read_download_response(
+                    &app_clone,
+                    &task_id,
+                    &filename,
+                    &url,
+                    response,
+                ).await?;
+
+                if let Some(parent) = save_path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                fs::write(&save_path, &bytes).map_err(|e| e.to_string())?;
+                Ok(bytes.len() as u64)
+            }.await;
+
+            match result {
+                Ok(downloaded_size) => {
+                    dl.lock().unwrap().push(filename.clone());
+                    emit_download_progress(
+                        &app_clone,
+                        &task_id,
+                        &filename,
+                        &url,
+                        downloaded_size,
+                        downloaded_size,
+                        100.0,
+                        "completed",
+                        None,
+                    );
+                }
+                Err(error) => {
+                    let error_msg = format!("{}: {}", filename, error);
                     fl.lock().unwrap().push(error_msg.clone());
-                    let _ = app_clone.emit("download-progress", DownloadProgressEvent {
-                        task_id,
-                        file_name: filename,
-                        url,
-                        total_size: 0,
-                        downloaded_size: 0,
-                        progress: 0.0,
-                        status: "failed".to_string(),
-                        error: Some(error_msg),
-                    });
-                },
-                Err(e) => {
-                    let error_msg = format!("{}: {}", filename, e);
-                    fl.lock().unwrap().push(error_msg.clone());
-                    let _ = app_clone.emit("download-progress", DownloadProgressEvent {
-                        task_id,
-                        file_name: filename,
-                        url,
-                        total_size: 0,
-                        downloaded_size: 0,
-                        progress: 0.0,
-                        status: "failed".to_string(),
-                        error: Some(error_msg),
-                    });
-                },
+                    emit_download_progress(
+                        &app_clone,
+                        &task_id,
+                        &filename,
+                        &url,
+                        0,
+                        0,
+                        0.0,
+                        "failed",
+                        Some(error_msg),
+                    );
+                }
             }
         })
     }).collect();
 
-    for h in handles { let _ = h.await; }
+    for handle in handles {
+        let _ = handle.await;
+    }
 
     Ok(DownloadResult {
         downloaded: Arc::try_unwrap(downloaded).unwrap().into_inner().unwrap(),
@@ -504,20 +523,71 @@ async fn download_files_to_dir(
 }
 
 #[tauri::command]
-async fn download_file(url: String, save_path: String) -> Result<(), String> {
-    let response = reqwest::get(&url).await.map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("下载失败: HTTP {}", response.status()));
-    }
-    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-    let path = PathBuf::from(&save_path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-    Ok(())
-}
+async fn download_file(app: AppHandle, url: String, save_path: String) -> Result<(), String> {
+    let task_id = uuid::Uuid::new_v4().to_string();
+    let file_name = PathBuf::from(&save_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download")
+        .to_string();
 
+    emit_download_progress(
+        &app,
+        &task_id,
+        &file_name,
+        &url,
+        0,
+        0,
+        0.0,
+        "downloading",
+        None,
+    );
+
+    let result: Result<u64, String> = async {
+        let response = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("下载失败: HTTP {}", response.status()));
+        }
+        let bytes = read_download_response(&app, &task_id, &file_name, &url, response).await?;
+        let path = PathBuf::from(&save_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+        Ok(bytes.len() as u64)
+    }.await;
+
+    match result {
+        Ok(downloaded_size) => {
+            emit_download_progress(
+                &app,
+                &task_id,
+                &file_name,
+                &url,
+                downloaded_size,
+                downloaded_size,
+                100.0,
+                "completed",
+                None,
+            );
+            Ok(())
+        }
+        Err(error) => {
+            emit_download_progress(
+                &app,
+                &task_id,
+                &file_name,
+                &url,
+                0,
+                0,
+                0.0,
+                "failed",
+                Some(error.clone()),
+            );
+            Err(error)
+        }
+    }
+}
 #[derive(serde::Serialize)]
 struct FileInfo {
     path: String,
