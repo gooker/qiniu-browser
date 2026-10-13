@@ -1490,8 +1490,20 @@ export function FileManager({ ak, sk, bucket, onBack, refreshTrigger, initialPre
                     <div className="w-44 shrink-0 hidden lg:block text-zinc-400 text-xs tabular-nums">{formatQiniuTime(file.putTime)}</div>
                     <div className="w-44 shrink-0 pr-5">
                       <div className="flex items-center justify-end gap-1">
-                        <button onClick={(e) => startRename(e, file)}
-                          className="p-1.5 text-zinc-400 hover:text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-900/30 rounded opacity-0 group-hover:opacity-100 transition-all" title="重命名">
+                        <button
+                          onClick={(e) => {
+                            if (isEditableTextFile(file)) {
+                              e.stopPropagation();
+                              openTextEditor(file);
+                            } else {
+                              startRename(e, file);
+                            }
+                          }}
+                          className={`p-1.5 rounded opacity-0 group-hover:opacity-100 transition-all ${isEditableTextFile(file)
+                            ? 'text-zinc-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30'
+                            : 'text-zinc-400 hover:text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-900/30'}`}
+                          title={isEditableTextFile(file) ? '编辑' : '重命名'}
+                        >
                           <Pencil className="w-4 h-4" />
                         </button>
                         <button onClick={(e) => { e.stopPropagation(); handleDownload(file.key); }}

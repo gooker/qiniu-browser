@@ -31,8 +31,10 @@ set "TAURI_EXIT=%ERRORLEVEL%"
 if not exist "%APP_ROOT%src-tauri\target\release\qiniu-browser.exe" goto :missing_binary
 if not "%TAURI_EXIT%"=="0" echo WARNING: Tauri reported exit code %TAURI_EXIT%, but the executable was generated. Continuing with artifact export.
 
-if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
-if errorlevel 1 goto :failed
+if not exist "%OUTPUT_DIR%" (
+  mkdir "%OUTPUT_DIR%"
+  if errorlevel 1 goto :failed
+)
 
 if not exist "%APP_ROOT%src-tauri\target\release\qiniu-browser.exe" goto :missing_binary
 copy /Y "%APP_ROOT%src-tauri\target\release\qiniu-browser.exe" "%OUTPUT_DIR%\qiniu-browser.exe" >nul
